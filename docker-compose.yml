@@ -1,0 +1,110 @@
+services:
+  reverse-proxy:
+    image: "traefik:v3.2"
+    command:
+      - "--log.level=DEBUG"
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # redirect everthing to https
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      # https://letsencrypt.org/docs/challenge-types/
+      - "--certificatesresolvers.mytlschallenge.acme.tlschallenge=true"
+      - "--certificatesresolvers.mytlschallenge.acme.email=marc@becheftigt.de"
+      - "--certificatesresolvers.mytlschallenge.acme.storage=/letsencrypt/acme.json"
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+      # let this expose only to localhost, use ssh-port-forwarding
+      # ssh -L 8080:localhost:8080 root@cloud.in-der-kothe.de
+      # then you can access the dashboard on localhost:8080
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - "/opt/nextcloud/letsencrypt:/letsencrypt"
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+  nextcloud:
+    image: nextcloud
+    environment:
+      - NEXTCLOUD_ADMIN_USER=marc
+      - NEXTCLOUD_ADMIN_PASSWORD=${NEXTCLOUD_ADMIN_PASSWORD}
+      - POSTGRES_DB=nextcloud_db
+      - POSTGRES_USER=nextcloud
+      - POSTGRES_PASSWORD=${POSTGRESQL_PASSWORD}
+      - POSTGRES_HOST=db
+      - NEXTCLOUD_TRUSTED_DOMAINS=cloud.in-der-kothe.de
+      - OVERWRITECLIURL=https://cloud.in-der-kothe.de
+      - OVERWRITEPROTOCOL=https
+      - OVERWRITEHOST=cloud.in-der-kothe.de
+      - PHP_MEMORY_LIMIT=2G
+      - PHP_UPLOAD_LIMIT=15G
+      - REDIS_HOST=redis
+      - REDIS_HOST_PORT=6379
+      - REDIS_HOST_PASSWORD=${REDIS_PASSWORD}
+      - OBJECTSTORE_S3_BUCKET=${OBJECTSTORE_S3_BUCKET}
+      - OBJECTSTORE_S3_HOST=${OBJECTSTORE_S3_HOST}
+      - OBJECTSTORE_S3_KEY=${OBJECTSTORE_S3_KEY}
+      - OBJECTSTORE_S3_SECRET=${OBJECTSTORE_S3_SECRET}
+      - OBJECTSTORE_S3_SSL=true
+      - OBJECTSTORE_S3_PORT=443
+      - SMTP_HOST=mail.your-server.de
+      - SMTP_SECURE=ssl
+      - SMTP_PORT=465
+      - SMTP_AUTHTYPE=PLAIN
+      - SMTP_NAME=nextcloud@in-der-kothe.de
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - MAIL_FROM_ADDRESS=nextcloud
+      - MAIL_DOMAIN=in-der-kothe.de
+
+    restart: always
+    volumes: 
+      - /opt/nextcloud/nextcloud-core:/var/www/html
+      - /opt/nextcloud/redis/redis-session.ini:/usr/local/etc/php/conf.d/redis-session.ini
+
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.nextcloud.rule=Host(`cloud.in-der-kothe.de`)"
+      - "traefik.http.routers.nextcloud.entrypoints=websecure"
+      - "traefik.http.routers.nextcloud.tls.certresolver=mytlschallenge"
+      - "traefik.http.middlewares.nextcloud.headers.customresponseheaders.Strict-Transport-Security=max-age=15552000; includeSubDomains"
+    depends_on:
+      - db
+      - reverse-proxy
+  db:
+    image: postgres:16-alpine 
+    restart: always
+    volumes:
+      - /opt/nextcloud/db/:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=nextcloud_db
+      - POSTGRES_USER=nextcloud
+      - POSTGRES_PASSWORD=${POSTGRESQL_PASSWORD}
+  collabora:
+    image: collabora/code
+    restart: always
+    environment:
+      - DONT_GEN_SSL_CERT=true
+      - extra_params=--o:ssl.enable=false --o:ssl.termination=true
+    depends_on:
+      - reverse-proxy
+    cap_add:
+      - MKNOD
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.collabora.rule=Host(`collabora.in-der-kothe.de`)"
+      - "traefik.http.routers.collabora.entrypoints=websecure"
+      - "traefik.http.routers.collabora.tls.certresolver=mytlschallenge"
+  redis:
+    image: redis:alpine
+    restart: always
+    depends_on:
+      - nextcloud
+    volumes:
+      - "/opt/nextcloud/redis:/data"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_HOST_PORT=6379
+    entrypoint: redis-server /data/redis.conf

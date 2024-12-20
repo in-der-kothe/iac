@@ -1,0 +1,78 @@
+# add some text
+- name: bootstrap nextcloud node
+  hosts: all
+  vars:
+    volume_id: "{{ lookup('file', 'volume_id') }}"
+  tasks:
+  - name: Update apt-cache and do dist upgrade
+    apt:
+      update_cache: yes
+      cache_valid_time: 3600
+      upgrade: dist
+  - name: Install required system packages
+    apt: name={{ item }} state=latest update_cache=yes force_apt_get=yes
+    loop: [ 'docker.io', 'docker-compose-v2' ]
+  - name: Check if reboot required
+    stat:
+      path: /var/run/reboot-required
+    register: reboot_required_file
+  - name: Reboot if required
+    reboot:
+    when: reboot_required_file.stat.exists == true
+  - name: copy compose file
+    copy:
+      src: docker-compose.yml
+      dest: /root/docker-compose.yml
+  - name: copy env file
+    copy:
+      src: ./.env
+      dest: /root/.env
+
+  - name: Create a symbolic from /opt/nextcloud to hetzer_cloud volume
+    ansible.builtin.file:
+      src: /mnt/HC_Volume_{{ volume_id }}
+      dest: /opt/nextcloud
+      state: link
+
+  # REDIS
+  - name: ensures redis dir exists
+    file: 
+      path: /opt/nextcloud/redis
+      state: directory
+  - name: copy redis ini
+    copy:
+      src: redis-session.ini
+      dest: /opt/nextcloud/redis/redis-session.ini
+  - name: copy redis conf
+    copy:
+      src: redis.conf
+      dest: /opt/nextcloud/redis/redis.conf
+
+  - name: Get redis password value from .env
+    command: sed -nE 's/^REDIS_PASSWORD=(.+)/\1/p' .env
+    register: redis_password  
+
+  - name: Replace password placeholder in redis.conf
+    ansible.builtin.replace:
+      path: /opt/nextcloud/redis/redis.conf
+      regexp: '(passplaceholder)'
+      replace: "{{ redis_password.stdout }}"
+  - name: Replace password placeholder in redis-session.ini
+    ansible.builtin.replace:
+      path: /opt/nextcloud/redis/redis-session.ini
+      regexp: '(passplaceholder)'
+      replace: "{{ redis_password.stdout }}"
+
+  # Bring up docker commpose environment
+  - name: Tear down existing services
+    community.docker.docker_compose_v2:
+      project_src: /root/
+      state: present
+
+  - name: Prune everything
+    community.docker.docker_prune:
+      containers: true
+      images: true
+      networks: true
+      volumes: true
+      builder_cache: true
